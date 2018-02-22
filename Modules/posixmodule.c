@@ -3263,10 +3263,19 @@ posix_getcwd(int use_bytes)
         /* If the buffer is large enough, len does not include the
            terminating \0. If the buffer is too small, len includes
            the space needed for the terminator. */
-        if (len >= Py_ARRAY_LENGTH(wbuf)) {
-            wbuf2 = PyMem_RawMalloc(len * sizeof(wchar_t));
-            if (wbuf2)
-                len = GetCurrentDirectoryW(len, wbuf2);
+        if (len > Py_ARRAY_LENGTH(wbuf)) {
+            DWORD tmplen;
+            wchar_t *tmpwbuf = NULL;
+            do {
+                tmplen = len;
+                wbuf2 = PyMem_RawRealloc(tmpwbuf, tmplen * sizeof(wchar_t));
+                if (!wbuf2) {
+                    PyMem_RawFree(tmpwbuf);
+                    break;
+                }
+                tmpwbuf = wbuf2;
+                len = GetCurrentDirectoryW(tmplen, wbuf2);
+            } while (len > tmplen);
         }
         Py_END_ALLOW_THREADS
         if (!wbuf2) {
