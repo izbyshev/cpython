@@ -1523,11 +1523,12 @@ win32_wchdir(LPCWSTR path)
             SetLastError(ERROR_OUTOFMEMORY);
             return FALSE;
         }
-        result = GetCurrentDirectoryW(result, new_path);
-        if (!result) {
+        int retry_result = GetCurrentDirectoryW(result, new_path);
+        if (!retry_result || retry_result > result) {
             PyMem_RawFree(new_path);
             return FALSE;
         }
+        result = retry_result;
     }
     int is_unc_like_path = (wcsncmp(new_path, L"\\\\", 2) == 0 ||
                             wcsncmp(new_path, L"//", 2) == 0);
