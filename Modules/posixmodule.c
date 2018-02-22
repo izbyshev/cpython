@@ -3244,6 +3244,51 @@ os_lchown_impl(PyObject *module, path_t *path, uid_t uid, gid_t gid)
 
 
 static PyObject *
+win32_wgetcwd(void)
+{
+    wchar_t wbuf[MAXPATHLEN];
+    wchar_t *wbuf2 = wbuf;
+    PyObject *resobj;
+    DWORD len;
+
+    Py_BEGIN_ALLOW_THREADS
+    len = GetCurrentDirectoryW(Py_ARRAY_LENGTH(wbuf), wbuf);
+    /* If the buffer is large enough, len does not include the
+       terminating \0. If the buffer is too small, len includes
+       the space needed for the terminator. */
+    if (len > Py_ARRAY_LENGTH(wbuf)) {
+        DWORD tmplen;
+        wchar_t *tmpwbuf = NULL;
+        do {
+            tmplen = len;
+            wbuf2 = PyMem_RawRealloc(tmpwbuf, tmplen * sizeof(wchar_t));
+            if (!wbuf2) {
+                PyMem_RawFree(tmpwbuf);
+                break;
+            }
+            tmpwbuf = wbuf2;
+            len = GetCurrentDirectoryW(tmplen, wbuf2);
+        } while (len > tmplen);
+    }
+    Py_END_ALLOW_THREADS
+
+    if (!wbuf2) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    if (!len) {
+        if (wbuf2 != wbuf)
+            PyMem_RawFree(wbuf2);
+        return PyErr_SetFromWindowsErr(0);
+    }
+    resobj = PyUnicode_FromWideChar(wbuf2, len);
+    if (wbuf2 != wbuf)
+        PyMem_RawFree(wbuf2);
+    return resobj;
+}
+
+
+static PyObject *
 posix_getcwd(int use_bytes)
 {
     char *buf, *tmpbuf;
@@ -3253,45 +3298,8 @@ posix_getcwd(int use_bytes)
     PyObject *obj;
 
 #ifdef MS_WINDOWS
-    if (!use_bytes) {
-        wchar_t wbuf[MAXPATHLEN];
-        wchar_t *wbuf2 = wbuf;
-        PyObject *resobj;
-        DWORD len;
-        Py_BEGIN_ALLOW_THREADS
-        len = GetCurrentDirectoryW(Py_ARRAY_LENGTH(wbuf), wbuf);
-        /* If the buffer is large enough, len does not include the
-           terminating \0. If the buffer is too small, len includes
-           the space needed for the terminator. */
-        if (len > Py_ARRAY_LENGTH(wbuf)) {
-            DWORD tmplen;
-            wchar_t *tmpwbuf = NULL;
-            do {
-                tmplen = len;
-                wbuf2 = PyMem_RawRealloc(tmpwbuf, tmplen * sizeof(wchar_t));
-                if (!wbuf2) {
-                    PyMem_RawFree(tmpwbuf);
-                    break;
-                }
-                tmpwbuf = wbuf2;
-                len = GetCurrentDirectoryW(tmplen, wbuf2);
-            } while (len > tmplen);
-        }
-        Py_END_ALLOW_THREADS
-        if (!wbuf2) {
-            PyErr_NoMemory();
-            return NULL;
-        }
-        if (!len) {
-            if (wbuf2 != wbuf)
-                PyMem_RawFree(wbuf2);
-            return PyErr_SetFromWindowsErr(0);
-        }
-        resobj = PyUnicode_FromWideChar(wbuf2, len);
-        if (wbuf2 != wbuf)
-            PyMem_RawFree(wbuf2);
-        return resobj;
-    }
+    if (!use_bytes)
+        return win32_wgetcwd();
 
     if (win32_warn_bytes_api())
         return NULL;
