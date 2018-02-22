@@ -3243,6 +3243,7 @@ os_lchown_impl(PyObject *module, path_t *path, uid_t uid, gid_t gid)
 #endif /* HAVE_LCHOWN */
 
 
+#ifdef MS_WINDOWS
 static PyObject *
 win32_wgetcwd(void)
 {
@@ -3286,6 +3287,7 @@ win32_wgetcwd(void)
         PyMem_RawFree(wbuf2);
     return resobj;
 }
+#endif
 
 
 static PyObject *
