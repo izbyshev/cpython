@@ -4276,9 +4276,13 @@ class NonBlockingTCPTests(ThreadedTCPSocketTest):
         if _testcapi.UINT_MAX >= _testcapi.ULONG_MAX:
             self.skipTest('needs UINT_MAX < ULONG_MAX')
         self.serv.setblocking(False)
+        if fcntl:
+            self.assertFalse(_is_fd_in_blocking_mode(self.serv))
         self.assertEqual(self.serv.gettimeout(), 0.0)
         self.serv.setblocking(_testcapi.UINT_MAX + 1)
         self.assertIsNone(self.serv.gettimeout())
+        if fcntl:
+            self.assertTrue(_is_fd_in_blocking_mode(self.serv))
 
     _testSetBlocking_overflow = support.cpython_only(_testSetBlocking)
 
