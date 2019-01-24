@@ -30,6 +30,12 @@
 # define SYS_getdents64  __NR_getdents64
 #endif
 
+#if defined(__linux__) && defined(HAVE_SIGNAL_H) && \
+    defined(HAVE_PTHREAD_SIGMASK) && !defined(HAVE_BROKEN_PTHREAD_SIGMASK)
+# include <signal.h>
+# define VFORK_USABLE 1
+#endif
+
 #if defined(__sun) && defined(__SVR4)
 /* readdir64 is used to work around Solaris 9 bug 6395699. */
 # define readdir readdir64
@@ -383,6 +389,43 @@ _close_open_fds_maybe_unsafe(long start_fd, PyObject* py_fds_to_keep)
 #endif  /* else NOT (defined(__linux__) && defined(HAVE_SYS_SYSCALL_H)) */
 
 
+#ifdef VFORK_USABLE
+/* Reset dispositions for all signals to SIG_DFL except for ignored
+ * signals. This way we ensure that no signal handlers can run
+ * after we unblock signals in a child created by vfork().
+ */
+static void
+reset_signal_handlers(void)
+{
+    struct sigaction sa_dfl = {.sa_handler = SIG_DFL};
+    for (int sig = 1; sig < _NSIG; sig++) {
+        /* Dispositions for SIGKILL and SIGSTOP can't be changed. */
+        if (sig == SIGKILL || sig == SIGSTOP) {
+            continue;
+        }
+
+        struct sigaction sa;
+        /* C libraries usually return EINVAL for signals used
+         * internally (e.g. for thread cancellation), so simply
+         * skip errors here. */
+        if (sigaction(sig, NULL, &sa) == -1) {
+            continue;
+        }
+
+        void *h = (sa.sa_flags & SA_SIGINFO ? (void *)sa.sa_sigaction :
+                                              (void *)sa.sa_handler);
+        if (h == SIG_IGN || h == SIG_DFL) {
+            continue;
+        }
+
+        /* This call can't reasonably fail, but if it does, terminating
+         * the child seems to be too harsh, so ignore errors. */
+        sigaction(sig, &sa_dfl, NULL);
+    }
+}
+#endif /* VFORK_USABLE */
+
+
 /*
  * This function is code executed in the child process immediately after fork
  * to set things up and call exec().
@@ -405,6 +448,9 @@ child_exec(char *const exec_array[],
            int errpipe_read, int errpipe_write,
            int close_fds, int restore_signals,
            int call_setsid,
+#ifdef VFORK_USABLE
+           sigset_t *old_sigs,
+#endif
            PyObject *py_fds_to_keep,
            PyObject *preexec_fn,
            PyObject *preexec_fn_args_tuple)
@@ -476,6 +522,13 @@ child_exec(char *const exec_array[],
 
     if (restore_signals)
         _Py_RestoreSignals();
+
+#ifdef VFORK_USABLE
+    if (old_sigs) {
+        reset_signal_handlers();
+        pthread_sigmask(SIG_SETMASK, old_sigs, NULL);
+    }
+#endif
 
 #ifdef HAVE_SETSID
     if (call_setsid)
@@ -688,7 +741,26 @@ subprocess_fork_exec(PyObject* self, PyObject *args)
         need_after_fork = 1;
     }
 
-    pid = fork();
+#ifdef VFORK_USABLE
+    sigset_t old_sigs;
+    int use_vfork = (preexec_fn == Py_None);
+    if (use_vfork) {
+        /* Block all signals to ensure that no signal handlers are run
+         * in the child process while it shares memory with us.
+         * Note that signals used internally by C libraries won't
+         * be blocked by pthread_sigmask(), but there doesn't seem
+         * to be a way for an application to send such signals
+         * to the child except with direct system calls. */
+        sigset_t all_sigs;
+        sigfillset(&all_sigs);
+        pthread_sigmask(SIG_BLOCK, &all_sigs, &old_sigs);
+        pid = vfork();
+    } else {
+#endif
+        pid = fork();
+#ifdef VFORK_USABLE
+    }
+#endif
     if (pid == 0) {
         /* Child process */
         /*
@@ -709,6 +781,9 @@ subprocess_fork_exec(PyObject* self, PyObject *args)
                    p2cread, p2cwrite, c2pread, c2pwrite,
                    errread, errwrite, errpipe_read, errpipe_write,
                    close_fds, restore_signals, call_setsid,
+#ifdef VFORK_USABLE
+                   use_vfork ? &old_sigs : NULL,
+#endif
                    py_fds_to_keep, preexec_fn, preexec_fn_args_tuple);
         _exit(255);
         return NULL;  /* Dead code to avoid a potential compiler warning. */
@@ -718,6 +793,19 @@ subprocess_fork_exec(PyObject* self, PyObject *args)
         /* Capture errno for the exception. */
         saved_errno = errno;
     }
+
+#ifdef VFORK_USABLE
+    if (use_vfork) {
+        /* vfork() semantics guarantees that the parent is blocked
+         * until the child performs _exit() or execve(), so it is safe
+         * to unblock signals once we're here.
+         * Note that in environments where vfork() is implemented as fork(),
+         * such as QEMU user-mode emulation, the parent won't be blocked,
+         * but it won't share the address space with the child,
+         * so it's still safe to unblock the signals. */
+        pthread_sigmask(SIG_SETMASK, &old_sigs, NULL);
+    }
+#endif
 
     Py_XDECREF(cwd_obj2);
 
