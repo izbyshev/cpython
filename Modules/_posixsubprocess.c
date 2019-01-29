@@ -427,34 +427,66 @@ reset_signal_handlers(void)
 
 
 /*
- * This function is code executed in the child process immediately after fork
- * to set things up and call exec().
+ * This function (v)forks a child process, sets things up and calls exec().
+ * In the parent process this function returns to the caller immediately
+ * after (v)fork().
  *
- * All of the code in this function must only use async-signal-safe functions,
+ * All of the child code must only use async-signal-safe functions,
  * listed at `man 7 signal` or
  * http://www.opengroup.org/onlinepubs/009695399/functions/xsh_chap02_04.html.
  *
  * This restriction is documented at
  * http://www.opengroup.org/onlinepubs/009695399/functions/fork.html.
  */
-static void
-child_exec(char *const exec_array[],
-           char *const argv[],
-           char *const envp[],
-           const char *cwd,
-           int p2cread, int p2cwrite,
-           int c2pread, int c2pwrite,
-           int errread, int errwrite,
-           int errpipe_read, int errpipe_write,
-           int close_fds, int restore_signals,
-           int call_setsid,
+static pid_t
+do_fork_exec(char *const exec_array[],
+             char *const argv[],
+             char *const envp[],
+             const char *cwd,
+             int p2cread_arg, int p2cwrite,
+             int c2pread, int c2pwrite_arg,
+             int errread, int errwrite_arg,
+             int errpipe_read, int errpipe_write,
+             int close_fds, int restore_signals,
+             int call_setsid,
 #ifdef VFORK_USABLE
-           sigset_t *old_sigs,
+             const sigset_t *old_sigs,
 #endif
-           PyObject *py_fds_to_keep,
-           PyObject *preexec_fn,
-           PyObject *preexec_fn_args_tuple)
+             PyObject *py_fds_to_keep,
+             PyObject *preexec_fn,
+             PyObject *preexec_fn_args_tuple)
 {
+
+    pid_t pid;
+
+#ifdef VFORK_USABLE
+    if (old_sigs) {
+        pid = vfork();
+    } else
+#endif
+    {
+        pid = fork();
+    }
+
+    if (pid != 0) {
+        return pid;
+    }
+
+    /* Child process */
+    /*
+     * Code from here to _exit() must only use async-signal-safe functions,
+     * listed at `man 7 signal` or
+     * http://www.opengroup.org/onlinepubs/009695399/functions/xsh_chap02_04.html.
+     */
+
+    if (preexec_fn != Py_None) {
+        /* We'll be calling back into Python later so we need to do this.
+         * This call may not be async-signal-safe but neither is calling
+         * back into Python.  The user asked us to use hope as a strategy
+         * to avoid deadlock... */
+        PyOS_AfterFork_Child();
+    }
+
     int i, saved_errno, reached_preexec = 0;
     PyObject *result;
     const char* err_msg = "";
@@ -473,6 +505,8 @@ child_exec(char *const exec_array[],
         POSIX_CALL(close(errread));
     POSIX_CALL(close(errpipe_read));
 
+    int p2cread = p2cread_arg;
+    int c2pwrite = c2pwrite_arg;
     /* When duping fds, if there arises a situation where one of the fds is
        either 0, 1 or 2, it is possible that it is overwritten (#12607). */
     if (c2pwrite == 0) {
@@ -482,6 +516,8 @@ child_exec(char *const exec_array[],
             goto error;
         }
     }
+
+    int errwrite = errwrite_arg;
     while (errwrite == 0 || errwrite == 1) {
         POSIX_CALL(errwrite = dup(errwrite));
         /* issue32270 */
@@ -603,6 +639,9 @@ error:
         _Py_write_noraise(errpipe_write, "SubprocessError:0:", 18);
         _Py_write_noraise(errpipe_write, err_msg, strlen(err_msg));
     }
+
+    _exit(255);
+    return 0;  /* Dead code to avoid a potential compiler warning. */
 }
 
 
@@ -754,40 +793,18 @@ subprocess_fork_exec(PyObject* self, PyObject *args)
         sigset_t all_sigs;
         sigfillset(&all_sigs);
         pthread_sigmask(SIG_BLOCK, &all_sigs, &old_sigs);
-        pid = vfork();
-    } else {
-#endif
-        pid = fork();
-#ifdef VFORK_USABLE
     }
 #endif
-    if (pid == 0) {
-        /* Child process */
-        /*
-         * Code from here to _exit() must only use async-signal-safe functions,
-         * listed at `man 7 signal` or
-         * http://www.opengroup.org/onlinepubs/009695399/functions/xsh_chap02_04.html.
-         */
 
-        if (preexec_fn != Py_None) {
-            /* We'll be calling back into Python later so we need to do this.
-             * This call may not be async-signal-safe but neither is calling
-             * back into Python.  The user asked us to use hope as a strategy
-             * to avoid deadlock... */
-            PyOS_AfterFork_Child();
-        }
-
-        child_exec(exec_array, argv, envp, cwd,
-                   p2cread, p2cwrite, c2pread, c2pwrite,
-                   errread, errwrite, errpipe_read, errpipe_write,
-                   close_fds, restore_signals, call_setsid,
+    pid = do_fork_exec(exec_array, argv, envp, cwd,
+                       p2cread, p2cwrite, c2pread, c2pwrite,
+                       errread, errwrite, errpipe_read, errpipe_write,
+                       close_fds, restore_signals, call_setsid,
 #ifdef VFORK_USABLE
-                   use_vfork ? &old_sigs : NULL,
+                       use_vfork ? &old_sigs : NULL,
 #endif
-                   py_fds_to_keep, preexec_fn, preexec_fn_args_tuple);
-        _exit(255);
-        return NULL;  /* Dead code to avoid a potential compiler warning. */
-    }
+                       py_fds_to_keep, preexec_fn, preexec_fn_args_tuple);
+
     /* Parent (original) process */
     if (pid == -1) {
         /* Capture errno for the exception. */
