@@ -30,7 +30,7 @@
 # define SYS_getdents64  __NR_getdents64
 #endif
 
-#if defined(__linux__) && defined(HAVE_SIGNAL_H) && \
+#if defined(__linux__) && defined(HAVE_VFORK) && defined(HAVE_SIGNAL_H) && \
     defined(HAVE_PTHREAD_SIGMASK) && !defined(HAVE_BROKEN_PTHREAD_SIGMASK)
 # include <signal.h>
 # define VFORK_USABLE 1
